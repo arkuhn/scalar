@@ -30,9 +30,17 @@ export type ResolveReferencesOptions = ThrowOnErrorOption & {
    */
   onDereference?: (data: { schema: AnyObject; ref: string }) => void
 }
+/*
+ * Cache for resolved URI references to avoid resolving the same reference multiple times.
+ */
+const refCache = new Map<string, AnyObject | undefined>()
 
 /**
  * Takes a specification and resolves all references.
+ *
+ * Performance optimized for large specs by:
+ * 1. Avoiding deep cloning of the input
+ * 2. Caching resolved references
  */
 export function resolveReferences(
   // Just a specification, or a set of files.
@@ -44,11 +52,11 @@ export function resolveReferences(
   // Errors that occurred during the process
   errors: ErrorObject[] = [],
 ): ResolveReferencesResult {
-  // Detach from input
-  const clonedInput = structuredClone(input)
+  // Clear the reference cache for a new resolution process
+  refCache.clear()
 
   // Make it a filesystem, even if it’s just one file
-  const filesystem = makeFilesystem(clonedInput)
+  const filesystem = makeFilesystem(input)
 
   // Get the main file
   const entrypoint = getEntrypoint(filesystem)
@@ -143,6 +151,11 @@ function resolveUri(
 
   errors: ErrorObject[],
 ): AnyObject | undefined {
+  // Use cache to avoid resolving the same URI multiple times
+  const cacheKey = `${file.filename}:${uri}`
+  if (refCache.has(cacheKey)) {
+    return refCache.get(cacheKey)
+  }
   // Ignore invalid URIs
   if (typeof uri !== 'string') {
     if (options?.throwOnError) {
@@ -179,11 +192,15 @@ function resolveUri(
         message: ERRORS.EXTERNAL_REFERENCE_NOT_FOUND.replace('%s', prefix),
       })
 
-      return undefined
+      const result = undefined
+      refCache.set(cacheKey, result)
+      return result
     }
     // $ref: 'other-file.yaml'
     if (path === undefined) {
-      return externalReference.specification
+      const result = externalReference.specification
+      refCache.set(cacheKey, result)
+      return result
     }
 
     // $ref: 'other-file.yaml#/foo/bar'
@@ -196,9 +213,11 @@ function resolveUri(
 
   // Try to find the URI
   try {
-    return segments.reduce((acc, key) => {
+    const result = segments.reduce((acc, key) => {
       return acc[key]
     }, file.specification)
+    refCache.set(cacheKey, result)
+    return result
   } catch (error) {
     if (options?.throwOnError) {
       throw new Error(ERRORS.INVALID_REFERENCE.replace('%s', uri))
@@ -210,5 +229,7 @@ function resolveUri(
     })
   }
 
-  return undefined
+  const result = undefined
+  refCache.set(cacheKey, result)
+  return result
 }

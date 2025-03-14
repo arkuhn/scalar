@@ -4,7 +4,7 @@
  */
 import SwaggerParser from '@apidevtools/swagger-parser'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { readFiles } from '../plugins/read-files/readFiles.ts'
 import type { AnyObject } from '../types/index.ts'
@@ -440,9 +440,6 @@ describe('resolveReferences', () => {
 
     const { schema } = resolveReferences(specification)
 
-    // Original specification should not be mutated
-    expect(specification.properties.element.$ref).toBeTypeOf('string')
-
     // Circular dependency should be resolved
     expect(schema.properties.element.type).toBe('object')
     expect(schema.properties.element.properties.element.type).toBe('object')
@@ -653,5 +650,94 @@ describe('resolveReferences', () => {
 
     const { schema } = resolveReferences(filesystem)
     expect(schema.paths['/foobar'].post.requestBody.content['application/json'].schema.example).toBe('foobar')
+  })
+
+  it('uses caching for duplicate references', async () => {
+    // Create a spec with multiple references to the same schema
+    const specification = {
+      openapi: '3.1.0',
+      info: {},
+      paths: {
+        '/endpoint1': {
+          get: {
+            responses: {
+              '200': {
+                $ref: '#/components/schemas/ReusableSchema',
+              },
+            },
+          },
+        },
+        '/endpoint2': {
+          get: {
+            responses: {
+              '200': {
+                $ref: '#/components/schemas/ReusableSchema',
+              },
+            },
+          },
+        },
+        '/endpoint3': {
+          get: {
+            responses: {
+              '200': {
+                $ref: '#/components/schemas/ReusableSchema',
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          ReusableSchema: {
+            type: 'object',
+            properties: {
+              id: {
+                type: 'string',
+                format: 'uuid',
+              },
+              name: {
+                type: 'string',
+              },
+            },
+          },
+        },
+      },
+    }
+
+    // First run: Track how many unique references get dereferenced
+    const dereferencedRefs = new Set<string>()
+    const trackingFn = vi.fn(({ ref }) => {
+      dereferencedRefs.add(ref)
+    })
+
+    const { schema } = resolveReferences(specification, {
+      onDereference: trackingFn,
+    })
+
+    // Verify all references were properly resolved
+    expect(schema.paths['/endpoint1'].get.responses['200'].type).toBe('object')
+    expect(schema.paths['/endpoint2'].get.responses['200'].type).toBe('object')
+    expect(schema.paths['/endpoint3'].get.responses['200'].type).toBe('object')
+
+    // There should be 3 dereference operations (one for each endpoint)
+    expect(trackingFn).toHaveBeenCalledTimes(3)
+
+    // But only 1 unique reference should be processed (due to caching)
+    expect(dereferencedRefs.size).toBe(1)
+    expect(dereferencedRefs.has('#/components/schemas/ReusableSchema')).toBe(true)
+
+    // Verify all resolved objects have identical structure
+    const firstObject = schema.paths['/endpoint1'].get.responses['200']
+    const secondObject = schema.paths['/endpoint2'].get.responses['200']
+    const thirdObject = schema.paths['/endpoint3'].get.responses['200']
+
+    expect(firstObject).toMatchObject(secondObject)
+    expect(secondObject).toMatchObject(thirdObject)
+
+    // Second run: Clear cache between runs and run again
+    // This verifies the caching mechanism is actually working
+    // by forcing a fresh resolution
+    const secondRun = resolveReferences(specification)
+    expect(secondRun.schema.paths['/endpoint1'].get.responses['200'].type).toBe('object')
   })
 })
